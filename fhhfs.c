@@ -9,11 +9,150 @@
 
 static fhhfs_magic_head* magic_head;
 static FILE* block_file;
+byte* fhhfs_read_file(unsigned long long block_id, unsigned long long count, void* process_buffer);
+static int fhhfs_get_next_node(int prev_id, void* buffer)
+{
+    //首先，查找node分配表.
+    unsigned long long* buf = buffer;
+    unsigned long long dest_node_page = prev_id / magic_head->node_size;
+    fseek(block_file,(magic_head->main_node_table_entry+dest_node_page)*magic_head->node_size,SEEK_SET);
+    fread(buffer,magic_head->node_size,1,block_file);
+    //读取数据。
+    return buf[prev_id%(magic_head->node_size/sizeof(unsigned long long))];
+}
+unsigned long long get_node_id_by_filename(int current_dir,char* filename,void* process_buffer)
+{
+    byte* dir_data = fhhfs_read_file(current_dir,0,process_buffer);
+    unsigned long long length = ((file_header*)dir_data)->filesize;
+    unsigned long long offset = sizeof(file_header);
+    unsigned long long node_id;
+    while(offset<length+sizeof(file_header))
+    {
+        node_id = *(unsigned long long*)(dir_data+offset);
+        if(!strcmp((char*)(dir_data+offset+sizeof(unsigned long long)),filename))
+        {
+            free(dir_data);
+            return node_id;
+        }
+        else
+        {
+            unsigned long filename_length = strlen((char*)(dir_data+offset+sizeof(unsigned long long)));
+            offset = offset+filename_length+sizeof(unsigned long long)+1;
+        }
+    }
+    free(dir_data);
+    //由于我们这里需要返回节点，ERR_NOTFOUND与根目录节点冲突。因此，我们返回ERR_GENERIC（-1）。
+    return ERR_GENERIC;
+}
+byte* fhhfs_read_file(unsigned long long block_id, unsigned long long count, void* process_buffer)
+{
+    if(count==0)
+    {
+        count = -1;
+    }
+    //由于至少有一个node，因此我们可以放心地读取1个。
+    byte buffer[magic_head->node_size];
+    fseek(block_file,block_id*magic_head->node_size,SEEK_SET);
+    fread(buffer,magic_head->node_size,1,block_file);
+    //读取node中关于文件大小的记载。
+    unsigned long long size = ((file_header*)((node*)&buffer)->data)->filesize;
+    //计算每个node的大小。
+    short node_size = sizeof(((node*)buffer)->data);
+    //计算总共需要读取几个node。
+    unsigned long long node_count = (size+sizeof(file_header))/node_size +1;
+    node_count = (node_count>count) ? count : node_count;
+    byte* total_byte = malloc(node_count*node_size);
+    for(int i=0;i<node_count;i++)
+    {
+        fseek(block_file,block_id*magic_head->node_size,SEEK_SET);
+        fread(buffer,magic_head->node_size,1,block_file);
+        memcpy(total_byte+i*node_size,((node*)&buffer)->data,node_size);
+        block_id = fhhfs_get_next_node(block_id,process_buffer);
+        //printf("The next node is:%llu\n",block_id);
+    }
+    return total_byte;
+}
+
+static unsigned long long get_node_id_by_full_path(const char* path,void* process_buffer) {
+    char temp_command[PATH_MAX];
+    strcpy(temp_command,path);
+    char* dir_name;
+    file_header* header;
+    char* tmp = temp_command;
+    int uid,gid,owner_priv,group_priv,other_priv;
+    //如果第一个就是/的话，我们直接回滚到开始。
+    int curr_dir = 1;
+    if(temp_command[0]=='/')
+    {
+        curr_dir = 1;
+        temp_command[1]='\0';
+        tmp += 1;
+    }
+    while((dir_name = strtok(tmp,"/"))!=NULL)
+    {
+        unsigned long long new_id = get_node_id_by_filename(curr_dir,dir_name,process_buffer);
+        if(new_id==-1)
+        {
+            return ERR_NOTFOUND;
+        }
+        header = (file_header*)fhhfs_read_file(new_id,1,process_buffer);
+        if(header->file_type!=1) //这TMD根本不是个文件夹！
+        {
+            free(header);
+            return ERR_GENERIC;
+        }
+        curr_dir = new_id;
+        uid = header->user_id;
+        gid = header->group_id;
+        owner_priv = header->owner_priv;
+        group_priv = header->group_priv;
+        other_priv = header->group_priv;
+        if(strcmp(dir_name,"."))
+        {
+            if(!strcmp(dir_name,".."))
+            {
+                unsigned long last_slash = strlen(path);
+                if(last_slash!=1)
+                {
+                    --last_slash;
+                }
+                while(path[--last_slash]!='/');
+                temp_command[last_slash+1]='\0';
+            }
+            else
+            {
+                strcat(temp_command,dir_name);
+                strcat(temp_command,"/");
+            }
+            
+        }
+        tmp = NULL;
+        free(header);
+    }
+    return curr_dir;
+}
 static int fhhfs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi)
 {
-    printf( "fhhfs:tfs_readdir path : %s ", path);
- 
-    return filler(buf, "Hello-world", NULL, 0);
+    void* working_buffer = malloc(magic_head->node_size);
+    //printf( "fhhfs:tfs_readdir path : %s ", path);
+    unsigned long long node_id = get_node_id_by_full_path(path,working_buffer);
+    if(node_id!=ERR_GENERIC) {
+        byte* dir_data = fhhfs_read_file(node_id,0,working_buffer);
+        unsigned long long length = ((file_header*)dir_data)->filesize;
+        unsigned long long offset = sizeof(file_header);
+        unsigned long long node_id;
+        while(offset<length+sizeof(file_header))
+        {
+            node_id = *(unsigned long long*)(dir_data+offset);
+            filler(buf, (char*)(dir_data+offset+sizeof(unsigned long long)), NULL, 0);
+            unsigned long filename_length = strlen((char*)(dir_data+offset+sizeof(unsigned long long)));
+            offset = offset+filename_length+sizeof(unsigned long long)+1;
+        }
+        free(dir_data);
+
+    }
+    return ERR_GENERIC;
+    //return filler(buf, "Hello-world", NULL, 0);
 }
 
 static int fhhfs_getattr(const char* path, struct stat *stbuf)
