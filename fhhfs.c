@@ -110,7 +110,6 @@ static int fhhfs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, of
 {
     void* working_buffer = malloc(magic_head->node_size);
     int result=SUCCESS;
-    //printf( "fhhfs:tfs_readdir path : %s ", path);
     unsigned long long node_id = get_node_id_by_full_path(path,working_buffer);
     if(node_id!=ERR_GENERIC) {
         byte* dir_data = fhhfs_read_file(node_id,0,working_buffer);
@@ -182,11 +181,36 @@ static void fhhfs_umount(void* data)
     fflush(block_file);
 }
 
-
+static int fhhfs_open(const char * filepath, struct fuse_file_info * fi)
+{
+    void* buffer = malloc(magic_head->node_size);
+    unsigned long long node_id = get_node_id_by_full_path(filepath,buffer);
+    //TODO:permission check.
+    fi->fh = node_id;
+    free(buffer);
+    return SUCCESS;
+}
+static int fhhfs_read(const char * path, char * buf, size_t size, off_t off,struct fuse_file_info * fi)
+{
+    size_t actual_copy_size = size;
+    void* buffer = malloc(magic_head->node_size);
+    //先不考虑大文件。
+    void* file_data = fhhfs_read_file(fi->fh,0,buffer);
+    if(((file_header*)file_data)->filesize<=size+off) {
+        actual_copy_size = ((file_header*)file_data)->filesize - off;
+    }
+    char* raw = file_data + sizeof(file_header);
+    memcpy(buf,raw+off,actual_copy_size);
+    free(file_data);
+    free(buffer);
+    return actual_copy_size;
+}
 static struct fuse_operations tfs_ops = {
-   .readdir = fhhfs_readdir,
-   .getattr = fhhfs_getattr,
-   .destroy = fhhfs_umount
+    .readdir = fhhfs_readdir,
+    .getattr = fhhfs_getattr,
+    .destroy = fhhfs_umount,
+    .open    = fhhfs_open,
+    .read    = fhhfs_read
 };
 void fhhfs_mount(void)
 {
