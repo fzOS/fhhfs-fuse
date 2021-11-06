@@ -20,8 +20,9 @@ static int fhhfs_get_next_node(int prev_id, void* buffer)
     //读取数据。
     return buf[prev_id%(magic_head->node_size/sizeof(unsigned long long))];
 }
-unsigned long long get_node_id_by_filename(int current_dir,char* filename,void* process_buffer)
-{
+unsigned long long get_node_id_by_filename(unsigned long long current_dir,char* filename,void* process_buffer)
+{   
+
     byte* dir_data = fhhfs_read_file(current_dir,0,process_buffer);
     unsigned long long length = ((file_header*)dir_data)->filesize;
     unsigned long long offset = sizeof(file_header);
@@ -68,7 +69,6 @@ byte* fhhfs_read_file(unsigned long long block_id, unsigned long long count, voi
         fread(buffer,magic_head->node_size,1,block_file);
         memcpy(total_byte+i*node_size,((node*)&buffer)->data,node_size);
         block_id = fhhfs_get_next_node(block_id,process_buffer);
-        //printf("The next node is:%llu\n",block_id);
     }
     return total_byte;
 }
@@ -79,90 +79,97 @@ static unsigned long long get_node_id_by_full_path(const char* path,void* proces
     char* dir_name;
     file_header* header;
     char* tmp = temp_command;
-    int uid,gid,owner_priv,group_priv,other_priv;
     //如果第一个就是/的话，我们直接回滚到开始。
-    int curr_dir = 1;
-    if(temp_command[0]=='/')
+    unsigned long long curr_dir = 1;
+    if(temp_command[1]=='\0')
     {
-        curr_dir = 1;
-        temp_command[1]='\0';
-        tmp += 1;
+        return curr_dir;
     }
-    while((dir_name = strtok(tmp,"/"))!=NULL)
-    {
-        unsigned long long new_id = get_node_id_by_filename(curr_dir,dir_name,process_buffer);
+
+    dir_name = strtok(tmp,"/");
+    unsigned long long new_id = get_node_id_by_filename(curr_dir,dir_name,process_buffer);        
         if(new_id==-1)
         {
             return ERR_NOTFOUND;
         }
-        header = (file_header*)fhhfs_read_file(new_id,1,process_buffer);
-        if(header->file_type!=1) //这TMD根本不是个文件夹！
+    curr_dir = new_id;
+    while((dir_name = strtok(NULL,"/"))!=NULL)
+    {
+        unsigned long long new_id = get_node_id_by_filename(curr_dir,dir_name,process_buffer);        
+        if(new_id==-1)
         {
-            free(header);
-            return ERR_GENERIC;
+            return ERR_NOTFOUND;
         }
         curr_dir = new_id;
-        uid = header->user_id;
-        gid = header->group_id;
-        owner_priv = header->owner_priv;
-        group_priv = header->group_priv;
-        other_priv = header->group_priv;
-        if(strcmp(dir_name,"."))
-        {
-            if(!strcmp(dir_name,".."))
-            {
-                unsigned long last_slash = strlen(path);
-                if(last_slash!=1)
-                {
-                    --last_slash;
-                }
-                while(path[--last_slash]!='/');
-                temp_command[last_slash+1]='\0';
-            }
-            else
-            {
-                strcat(temp_command,dir_name);
-                strcat(temp_command,"/");
-            }
-            
-        }
-        tmp = NULL;
-        free(header);
     }
+    //已经到当前目录。
+
     return curr_dir;
 }
 static int fhhfs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi)
 {
     void* working_buffer = malloc(magic_head->node_size);
+    int result=SUCCESS;
     //printf( "fhhfs:tfs_readdir path : %s ", path);
     unsigned long long node_id = get_node_id_by_full_path(path,working_buffer);
     if(node_id!=ERR_GENERIC) {
         byte* dir_data = fhhfs_read_file(node_id,0,working_buffer);
+        if(dir_data==NULL) {
+            goto readdir_fail;
+        }
         unsigned long long length = ((file_header*)dir_data)->filesize;
         unsigned long long offset = sizeof(file_header);
         unsigned long long node_id;
-        while(offset<length+sizeof(file_header))
+        while(result==SUCCESS&&offset<length+sizeof(file_header))
         {
             node_id = *(unsigned long long*)(dir_data+offset);
-            filler(buf, (char*)(dir_data+offset+sizeof(unsigned long long)), NULL, 0);
+            fi->fh = node_id;
+            result=filler(buf, (char*)(dir_data+offset+sizeof(unsigned long long)), NULL, 0);
             unsigned long filename_length = strlen((char*)(dir_data+offset+sizeof(unsigned long long)));
             offset = offset+filename_length+sizeof(unsigned long long)+1;
         }
         free(dir_data);
 
     }
-    return ERR_GENERIC;
-    //return filler(buf, "Hello-world", NULL, 0);
+    
+    else {
+        result = ERR_GENERIC;
+    }
+readdir_fail:
+    free(working_buffer);
+    return result;
 }
 
 static int fhhfs_getattr(const char* path, struct stat *stbuf)
 {
-    printf("fhhfs:tfs_getattr path : %s ", path);
-    if(strcmp(path, "/") == 0)
-        stbuf->st_mode = 0755 | S_IFDIR;
-    else
-        stbuf->st_mode = 0644 | S_IFREG;
-    return 0;
+    void* buffer = malloc(magic_head->node_size);
+    unsigned long long node_id=get_node_id_by_full_path(path,buffer);
+    if(node_id!=ERR_GENERIC) {
+        file_header* dir_data = (file_header*)fhhfs_read_file(node_id,1,buffer);
+        if(dir_data==NULL) {
+            free(buffer);
+            return ERR_GENERIC;
+        }
+        stbuf->st_gid = dir_data->group_id;
+        stbuf->st_uid = dir_data->user_id;
+        stbuf->st_size = dir_data->filesize;
+        stbuf->st_mode = ((dir_data->owner_priv)<<6) | ((dir_data->group_priv)<<3) | ((dir_data->owner_priv));
+        switch (dir_data->file_type) {
+            case 0:{stbuf->st_mode|=S_IFREG;break;}
+            case 1:{stbuf->st_mode|=S_IFDIR;break;}
+            case 2:{stbuf->st_mode|=S_IFBLK;break;}
+            case 3:{stbuf->st_mode|=S_IFLNK;break;}
+        }
+        stbuf->st_ctim.tv_sec = dir_data->create_timestamp;
+        stbuf->st_mtim.tv_sec = dir_data->modify_timestamp;
+        stbuf->st_atim.tv_sec = dir_data->open_timestamp;
+        free(dir_data);
+    }
+    else {
+        return ERR_GENERIC;
+    }
+    free(buffer);
+    return SUCCESS;
 }
 
 static void fhhfs_umount(void* data)
@@ -235,7 +242,7 @@ int main(int argc, char *argv[])
         exit(-1);
     }
     fhhfs_mount();
-    char* args_to_fuse[2] = {argv[0],argv[2]};
-    ret = fuse_main(2, args_to_fuse, &tfs_ops, NULL);
+    char* args_to_fuse[3] = {argv[0],argv[2],"-f"};
+    ret = fuse_main(3, args_to_fuse, &tfs_ops, NULL);
     return ret;
 }
