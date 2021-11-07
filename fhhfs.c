@@ -20,6 +20,68 @@ static int fhhfs_get_next_node(int prev_id, void* buffer)
     //读取数据。
     return buf[prev_id%(magic_head->node_size/sizeof(unsigned long long))];
 }
+int write_node_id(unsigned long long node,unsigned long long value,void* process_buffer)
+{
+    unsigned long long* table_buffer = process_buffer;
+    //首先，查找node分配表.
+    unsigned long long dest_node_page = node / magic_head->node_size;
+    fseek(block_file,(magic_head->main_node_table_entry+dest_node_page)*magic_head->node_size,SEEK_SET);
+    fread(table_buffer, magic_head->node_size,1,block_file);
+    //写入数据。
+    table_buffer[node%( magic_head->node_size/sizeof(unsigned long long))] = value;
+    fseek(block_file,(magic_head->main_node_table_entry+dest_node_page)*magic_head->node_size,SEEK_SET);
+    fwrite(table_buffer,magic_head->node_size,1,block_file);
+    //fflush(block_file);
+    return SUCCESS;
+}
+//定义分配新节点的函数。
+//当占用率小于30%时，首个节点采取随机分配。
+//当占用率大于30%时，首个节点采取顺序分配。
+static int allocate_node(unsigned long long* dest,int n,void* process_buffer)
+{
+    //如果剩余空间不足，那么直接退出。
+    if(magic_head->node_used+n>magic_head->node_total)
+    {
+        return ERR_EXCEEDED;
+    }
+    unsigned long long tmp;
+    if(magic_head->node_used*1.0/magic_head->node_total>0.3)
+    {
+        //顺序分配。
+        tmp = 0;
+        while(fhhfs_get_next_node(++tmp,process_buffer)!=0);
+    }
+    else
+    {  
+        //随机分配。
+        while(fhhfs_get_next_node((tmp = rand()*1.0/RAND_MAX*magic_head->node_total,tmp),process_buffer)!=0);
+    }
+    for(int i=0;i<n;i++)
+    {
+        dest[i]=tmp;
+        while(fhhfs_get_next_node(++tmp,process_buffer)!=0)
+        {
+            if(tmp >= magic_head->node_total)
+            {
+                tmp = tmp - magic_head->node_total;
+            }
+        }
+    }
+    if(n>1)
+    {
+        for(int i=0;i<n-1;i++)
+        {
+            write_node_id(dest[i],(dest[i+1]),process_buffer);
+        }
+        write_node_id(dest[n-1],1,process_buffer);
+    }
+    else
+    {
+        write_node_id(dest[0],1,process_buffer);
+    }
+    
+    return SUCCESS;
+}
 unsigned long long get_node_id_by_filename(unsigned long long current_dir,char* filename,void* process_buffer)
 {   
 
@@ -45,6 +107,7 @@ unsigned long long get_node_id_by_filename(unsigned long long current_dir,char* 
     //由于我们这里需要返回节点，ERR_NOTFOUND与根目录节点冲突。因此，我们返回ERR_GENERIC（-1）。
     return ERR_GENERIC;
 }
+
 byte* fhhfs_read_file(unsigned long long block_id, unsigned long long count, void* process_buffer)
 {
     if(count==0)
@@ -72,8 +135,83 @@ byte* fhhfs_read_file(unsigned long long block_id, unsigned long long count, voi
     }
     return total_byte;
 }
-
-static unsigned long long get_node_id_by_full_path(const char* path,void* process_buffer) {
+int fhhfs_write_file(unsigned long long orig_node_id,file_header* new_file,void* process_buffer)
+{
+    //由于传入了文件的格式，我们可以放心地读取文件头中关于长度的定义。
+    unsigned long long node_count = (((new_file)->filesize)+sizeof(file_header)-1) / magic_head->node_size+1;
+    unsigned long long node_id[node_count+1];
+    //如果原来没有传入node id的话，我们生成一个。
+    if(!orig_node_id)
+    {
+        printf("DEBUG:Not passing orig node id!");
+        unsigned long long tmp[1];
+        allocate_node(tmp,1,process_buffer);
+        orig_node_id = tmp[0];
+    }
+    node_id[0] = orig_node_id;
+    unsigned long long pointer = 0;
+    //如果原来节点分配表中有节点记录的话，那么复用这些信息。
+    while((node_id[pointer]!=1||pointer==0)&&pointer<node_count)
+    {
+        node_id[pointer+1] = fhhfs_get_next_node(node_id[pointer],process_buffer);
+        ++pointer;
+    };
+    if(pointer<node_count)
+    {
+        //如果不够，那么就多分配几个。
+        allocate_node(node_id+pointer,node_count-pointer,process_buffer);
+        
+    }
+    else
+    {
+        if(node_id[pointer]!=1)
+        {
+            //如果超了，那么就把原先的置0.
+            unsigned long long tmp_node = node_id[pointer];
+            unsigned long long tmp_node_next = tmp_node;
+            while(tmp_node && tmp_node!=1)
+            {
+                tmp_node_next = fhhfs_get_next_node(tmp_node,process_buffer);
+                write_node_id(tmp_node,0,process_buffer);
+                tmp_node = tmp_node_next;
+            }
+            node_id[pointer] = 1;
+        }
+    }
+    //然后是相对简单的写文件环节。
+    pointer = 0;
+    for(;pointer<node_count;pointer++)
+    {
+        fseek(block_file,node_id[pointer]*magic_head->node_size,SEEK_SET);
+        fwrite(new_file+pointer*magic_head->node_size,((pointer==node_count-1)?(((((file_header*)new_file)->filesize)+sizeof(file_header))%magic_head->node_size):magic_head->node_size),1,block_file);
+    }
+    return SUCCESS;
+}
+int update_dir(unsigned long long dir_id,unsigned long long node_id,const char* filename,void* process_buffer)
+{
+    byte* file_data = fhhfs_read_file(dir_id,0,process_buffer);
+    file_header* header = (file_header*) file_data;
+    //计算是否需要申请新的块。
+    int free_size = magic_head->node_size-(magic_head->node_size%(header->filesize+sizeof(file_header)));
+    if(free_size < sizeof(node_id)+strlen(filename))
+    {
+        file_data = realloc(file_data,(header->filesize
+                                      +sizeof(file_header)
+                                      +sizeof(node_id)
+                                      +strlen(filename)-1)/magic_head->node_size
+                                      +1
+                                      );
+    }
+    int offset = header->filesize+sizeof(file_header);
+    memcpy(file_data+offset,&node_id,sizeof(unsigned long long));
+    offset += sizeof(unsigned long long);
+    sprintf((char*)(file_data+offset),"%s",filename);
+    header->filesize += sizeof(node_id)+strlen(filename)+1;
+    fhhfs_write_file(dir_id,header,process_buffer);
+    free(file_data);
+    return SUCCESS;
+}
+static unsigned long long get_node_id_by_full_path(const char* path,PathResolveMethod method,void* process_buffer) {
     char temp_command[PATH_MAX];
     strcpy(temp_command,path);
     char* dir_name;
@@ -88,17 +226,29 @@ static unsigned long long get_node_id_by_full_path(const char* path,void* proces
 
     dir_name = strtok(tmp,"/");
     unsigned long long new_id = get_node_id_by_filename(curr_dir,dir_name,process_buffer);        
-        if(new_id==-1)
-        {
+    if(new_id==-1)
+    {
+        if(method==RESOLVE_SELF|| strtok(NULL,"/")!=NULL) {
+            printf("a\n");
             return ERR_NOTFOUND;
         }
+        else {
+            printf("b\n");
+            return curr_dir;
+        }
+    }
     curr_dir = new_id;
     while((dir_name = strtok(NULL,"/"))!=NULL)
     {
         unsigned long long new_id = get_node_id_by_filename(curr_dir,dir_name,process_buffer);        
         if(new_id==-1)
         {
-            return ERR_NOTFOUND;
+            if(method==RESOLVE_SELF || strtok(NULL,"/")!=NULL) {
+                return ERR_NOTFOUND;
+            }
+            else {
+                return curr_dir;
+            }
         }
         curr_dir = new_id;
     }
@@ -110,7 +260,7 @@ static int fhhfs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, of
 {
     void* working_buffer = malloc(magic_head->node_size);
     int result=SUCCESS;
-    unsigned long long node_id = get_node_id_by_full_path(path,working_buffer);
+    unsigned long long node_id = get_node_id_by_full_path(path,RESOLVE_SELF,working_buffer);
     if(node_id!=ERR_GENERIC) {
         byte* dir_data = fhhfs_read_file(node_id,0,working_buffer);
         if(dir_data==NULL) {
@@ -141,12 +291,15 @@ readdir_fail:
 
 static int fhhfs_getattr(const char* path, struct stat *stbuf)
 {
+    printf("Getattr %s.\n",path);
     void* buffer = malloc(magic_head->node_size);
-    unsigned long long node_id=get_node_id_by_full_path(path,buffer);
-    if(node_id!=ERR_GENERIC) {
+    unsigned long long node_id=get_node_id_by_full_path(path,RESOLVE_SELF,buffer);
+    if(node_id!=ERR_NOTFOUND) {
+        printf("Got %s at %lld.\n",path,node_id);
         file_header* dir_data = (file_header*)fhhfs_read_file(node_id,1,buffer);
         if(dir_data==NULL) {
             free(buffer);
+            errno = ENOENT;
             return ERR_GENERIC;
         }
         stbuf->st_gid = dir_data->group_id;
@@ -165,6 +318,9 @@ static int fhhfs_getattr(const char* path, struct stat *stbuf)
         free(dir_data);
     }
     else {
+        printf("Cannot got %s.\n",path);
+        free(buffer);
+        errno = ENOENT;
         return ERR_GENERIC;
     }
     free(buffer);
@@ -179,12 +335,14 @@ static void fhhfs_umount(void* data)
     unsigned crc_value = crc32(CRC_MAGIC_NUMBER,(byte*)magic_head,sizeof(fhhfs_magic_head));
     fwrite(&crc_value,sizeof(crc_value),1,block_file);
     fflush(block_file);
+    fclose(block_file);
+    free(magic_head);
 }
 
 static int fhhfs_open(const char * filepath, struct fuse_file_info * fi)
 {
     void* buffer = malloc(magic_head->node_size);
-    unsigned long long node_id = get_node_id_by_full_path(filepath,buffer);
+    unsigned long long node_id = get_node_id_by_full_path(filepath,RESOLVE_SELF,buffer);
     //TODO:permission check.
     fi->fh = node_id;
     free(buffer);
@@ -205,12 +363,80 @@ static int fhhfs_read(const char * path, char * buf, size_t size, off_t off,stru
     free(buffer);
     return actual_copy_size;
 }
+static int fhhfs_write(const char * filename, const char * buf, size_t size, off_t off,struct fuse_file_info * fi)
+{
+    printf("Write %s.\n",filename);
+    void* buffer = malloc(magic_head->node_size);
+    void* file_data = fhhfs_read_file(fi->fh,0,buffer);
+    if(((file_header*)file_data)->filesize<size+off) {
+        file_data = realloc(file_data,sizeof(file_header)+size+off);
+    }
+    memcpy(file_data+sizeof(file_header)+off,buf,size);
+    int ret = fhhfs_write_file(fi->fh, (file_header*)file_data,buffer);
+    free(file_data);
+    free(buffer);
+    if(ret==SUCCESS) {
+        return size;
+    }
+    else {
+        return ERR_GENERIC;
+    }
+}
+static int fhhfs_create(const char * path, mode_t mode, struct fuse_file_info * fi)
+{
+    printf("Create %s.\n",path);
+    int ret=SUCCESS;
+    void* buffer = malloc(magic_head->node_size);
+    unsigned long long parent_node_id = get_node_id_by_full_path(path,RESOLVE_PARENT,buffer);
+    //找出文件名。
+    const char* real_filename=&path[strlen(path)-1];
+    while(*real_filename!='/')
+    {
+        real_filename--;
+    }
+    if(parent_node_id!=ERR_NOTFOUND) {
+        unsigned long long node_buffer[2];
+        if(allocate_node(node_buffer,1,buffer)!=ERR_EXCEEDED) {
+            update_dir(parent_node_id,node_buffer[0],real_filename,buffer);
+            unsigned long long timestamp = time(NULL);
+            file_header h = {
+                .create_timestamp = timestamp,
+                .modify_timestamp = timestamp,
+                .open_timestamp   = timestamp,
+                .file_type        = 0, 
+                .owner_priv       = 06, // rw-
+                .group_priv       = 04, // r--
+                .other_priv       = 04, // r--
+                .user_id          = 0,  //root
+                .group_id         = 0,  //wheel
+                .filesize         = 0
+            };
+            fhhfs_write_file(fi->fh,&h,buffer);
+        }
+        ret = ERR_EXCEEDED;
+    }
+    else {
+        ret = ERR_NOTFOUND;
+    }
+    free(buffer);
+    return ret;
+}
+static int fhhfs_statfs(const char *path, struct statvfs * fs)
+{
+    fs->f_blocks = magic_head->node_total;
+    fs->f_bsize  = magic_head->node_size;
+    fs->f_bavail = magic_head->node_total - magic_head->node_used; 
+    return SUCCESS;
+}
 static struct fuse_operations tfs_ops = {
     .readdir = fhhfs_readdir,
     .getattr = fhhfs_getattr,
     .destroy = fhhfs_umount,
     .open    = fhhfs_open,
-    .read    = fhhfs_read
+    .read    = fhhfs_read,
+    .write   = fhhfs_write,
+    .create  = fhhfs_create,
+    .statfs  = fhhfs_statfs
 };
 void fhhfs_mount(void)
 {

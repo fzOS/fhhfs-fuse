@@ -16,6 +16,7 @@ typedef unsigned char byte;
 #ifdef __linux__
 #include <linux/limits.h>
 #endif
+#include <errno.h>
 
 //定义文件系统的"Magic Struct"。
 //该Magic Struct从分区的0磁道2扇区(+1024K)处开始。
@@ -67,11 +68,11 @@ typedef struct file_header
     在fhhfs-sh中，这些错误代码将会被使用。
  */
 #define SUCCESS 0
-#define ERR_NOTFOUND 1 //没有发现文件
-#define ERR_READONLY 2 //没有写入权限
-#define ERR_PERMDENI 3 //操作权限拒绝
-#define ERR_EXCEEDED 4 //数据超出限制
-#define ERR_GENERIC -1 //其他通用错误
+#define ERR_NOTFOUND -2 //没有发现文件
+#define ERR_READONLY -3 //没有写入权限
+#define ERR_PERMDENI -4 //操作权限拒绝
+#define ERR_EXCEEDED -5 //数据超出限制
+#define ERR_GENERIC  -1 //其他通用错误
 
 /*
   节点表的数据结构定义无法使用typedef。
@@ -94,4 +95,9 @@ typedef struct {
     unsigned long long offset;
     file_header header;
 } opened_file;
+
+typedef enum {
+    RESOLVE_SELF=0,
+    RESOLVE_PARENT=1
+} PathResolveMethod;
 #endif
