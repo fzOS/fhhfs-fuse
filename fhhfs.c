@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+
 #include <fuse.h>
 #include <zlib.h>
 #include <time.h>
@@ -229,11 +231,9 @@ static unsigned long long get_node_id_by_full_path(const char* path,PathResolveM
     if(new_id==-1)
     {
         if(method==RESOLVE_SELF|| strtok(NULL,"/")!=NULL) {
-            printf("a\n");
             return ERR_NOTFOUND;
         }
         else {
-            printf("b\n");
             return curr_dir;
         }
     }
@@ -282,7 +282,7 @@ static int fhhfs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, of
     }
     
     else {
-        result = ERR_GENERIC;
+        result = ERR_NOTFOUND;
     }
 readdir_fail:
     free(working_buffer);
@@ -300,28 +300,28 @@ static int fhhfs_getattr(const char* path, struct stat *stbuf)
         if(dir_data==NULL) {
             free(buffer);
             errno = ENOENT;
-            return ERR_GENERIC;
+            return ERR_NOTFOUND;
         }
         stbuf->st_gid = dir_data->group_id;
         stbuf->st_uid = dir_data->user_id;
         stbuf->st_size = dir_data->filesize;
         stbuf->st_mode = ((dir_data->owner_priv)<<6) | ((dir_data->group_priv)<<3) | ((dir_data->owner_priv));
         switch (dir_data->file_type) {
-            case 0:{stbuf->st_mode|=S_IFREG;break;}
-            case 1:{stbuf->st_mode|=S_IFDIR;break;}
-            case 2:{stbuf->st_mode|=S_IFBLK;break;}
-            case 3:{stbuf->st_mode|=S_IFLNK;break;}
+            case 0:{stbuf->st_mode|=__S_IFREG;break;}
+            case 1:{stbuf->st_mode|=__S_IFDIR;break;}
+            case 2:{stbuf->st_mode|=__S_IFBLK;break;}
+            case 3:{stbuf->st_mode|=__S_IFLNK;break;}
         }
-        stbuf->st_ctim.tv_sec = dir_data->create_timestamp;
-        stbuf->st_mtim.tv_sec = dir_data->modify_timestamp;
-        stbuf->st_atim.tv_sec = dir_data->open_timestamp;
+        stbuf->st_ctime = dir_data->create_timestamp;
+        stbuf->st_mtime= dir_data->modify_timestamp;
+        stbuf->st_atime = dir_data->open_timestamp;
         free(dir_data);
     }
     else {
         printf("Cannot got %s.\n",path);
         free(buffer);
         errno = ENOENT;
-        return ERR_GENERIC;
+        return ERR_NOTFOUND;
     }
     free(buffer);
     return SUCCESS;
@@ -379,7 +379,7 @@ static int fhhfs_write(const char * filename, const char * buf, size_t size, off
         return size;
     }
     else {
-        return ERR_GENERIC;
+        return EFBIG;
     }
 }
 static int fhhfs_create(const char * path, mode_t mode, struct fuse_file_info * fi)
@@ -389,10 +389,13 @@ static int fhhfs_create(const char * path, mode_t mode, struct fuse_file_info * 
     void* buffer = malloc(magic_head->node_size);
     unsigned long long parent_node_id = get_node_id_by_full_path(path,RESOLVE_PARENT,buffer);
     //找出文件名。
-    const char* real_filename=&path[strlen(path)-1];
-    while(*real_filename!='/')
+    const char* real_filename=&path[strlen(path)];
+    while(*(real_filename-1)!='/')
     {
         real_filename--;
+        if(real_filename==path) {
+            break;
+        }
     }
     if(parent_node_id!=ERR_NOTFOUND) {
         unsigned long long node_buffer[2];
@@ -413,7 +416,10 @@ static int fhhfs_create(const char * path, mode_t mode, struct fuse_file_info * 
             };
             fhhfs_write_file(fi->fh,&h,buffer);
         }
-        ret = ERR_EXCEEDED;
+        else {
+            ret = ERR_EXCEEDED;
+        }
+
     }
     else {
         ret = ERR_NOTFOUND;
@@ -492,7 +498,7 @@ int main(int argc, char *argv[])
         exit(-1);
     }
     fhhfs_mount();
-    char* args_to_fuse[3] = {argv[0],argv[2],"-f"};
+    char* args_to_fuse[3] = {argv[0],argv[2],"-d"};
     ret = fuse_main(3, args_to_fuse, &tfs_ops, NULL);
     return ret;
 }

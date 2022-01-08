@@ -17,7 +17,7 @@ typedef unsigned char byte;
 #include <linux/limits.h>
 #endif
 #include <errno.h>
-
+#include <sys/stat.h>
 //定义文件系统的"Magic Struct"。
 //该Magic Struct从分区的0磁道2扇区(+1024K)处开始。
 typedef struct fhhfs_magic_head
@@ -68,10 +68,10 @@ typedef struct file_header
     在fhhfs-sh中，这些错误代码将会被使用。
  */
 #define SUCCESS 0
-#define ERR_NOTFOUND -2 //没有发现文件
-#define ERR_READONLY -3 //没有写入权限
-#define ERR_PERMDENI -4 //操作权限拒绝
-#define ERR_EXCEEDED -5 //数据超出限制
+#define ERR_NOTFOUND -ENOENT  //没有发现文件
+#define ERR_READONLY -EROFS   //没有写入权限
+#define ERR_PERMDENI -EACCES  //操作权限拒绝
+#define ERR_EXCEEDED -ENOSPC  //数据超出限制
 #define ERR_GENERIC  -1 //其他通用错误
 
 /*
@@ -84,17 +84,6 @@ typedef struct file_header
 */
 #define NODE_UNUSED 0
 #define NODE_EOF    1
-
-
-/*
-    按照lhb要求的文件打开的结构体。
-    目前，貌似只需要首块号、存储文件的位置，以及文件头。
-*/
-typedef struct {
-    unsigned long long first_block;
-    unsigned long long offset;
-    file_header header;
-} opened_file;
 
 typedef enum {
     RESOLVE_SELF=0,
