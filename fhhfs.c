@@ -63,7 +63,7 @@ static int allocate_node(unsigned long long* dest,int n,void* process_buffer)
     for(int i=0;i<n;i++)
     {
         dest[i]=tmp;
-        while(fhhfs_get_next_node(++tmp,process_buffer)!=0)
+        while(fhhfs_get_next_node(++tmp,process_buffer)!=0 && tmp < magic_head->node_total)
         {
             if(tmp >= magic_head->node_total)
             {
@@ -88,6 +88,10 @@ static int allocate_node(unsigned long long* dest,int n,void* process_buffer)
         printf("%lld ",dest[i]);
     }
     printf("\n");
+    fseek(block_file,0,SEEK_SET);
+    magic_head->node_used += n;
+    fwrite(magic_head,sizeof(fhhfs_magic_head),1,block_file);
+    fflush(block_file);
     return SUCCESS;
 }
 unsigned long long get_node_id_by_filename(unsigned long long current_dir,char* filename,void* process_buffer)
