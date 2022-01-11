@@ -20,7 +20,6 @@ static int fhhfs_get_next_node(unsigned long long prev_id, void* buffer)
     fread(buffer,magic_head->node_size,1,block_file);
     //读取数据。
     unsigned long long ret = buf[prev_id%(magic_head->node_size/sizeof(unsigned long long))];
-    printf("The next node of %lld is %lld\n",prev_id,ret);
     return ret;
 }
 int write_node_id(unsigned long long node,unsigned long long value,void* process_buffer)
@@ -35,7 +34,6 @@ int write_node_id(unsigned long long node,unsigned long long value,void* process
     fseek(block_file,(magic_head->main_node_table_entry+dest_node_page)*magic_head->node_size,SEEK_SET);
     fwrite(table_buffer,magic_head->node_size,1,block_file);
     fflush(block_file);
-    printf("Writing node:%lld->%lld\n",node,table_buffer[node%( magic_head->node_size/sizeof(unsigned long long))]);
     return SUCCESS;
 }
 //定义分配新节点的函数。
@@ -83,11 +81,6 @@ static int allocate_node(unsigned long long* dest,int n,void* process_buffer)
     {
         write_node_id(dest[0],1,process_buffer);
     }
-    printf("Nodes allocated:");
-    for(int i=0;i<n;i++) {
-        printf("%lld ",dest[i]);
-    }
-    printf("\n");
     fseek(block_file,0,SEEK_SET);
     magic_head->node_used += n;
     fwrite(magic_head,sizeof(fhhfs_magic_head),1,block_file);
@@ -137,7 +130,6 @@ byte* fhhfs_read_file(unsigned long long block_id, unsigned long long count, voi
     //计算总共需要读取几个node。
     unsigned long long node_count = (size+sizeof(file_header))/node_size +1;
     node_count = (node_count>count) ? count : node_count;
-    printf("%llu*%d=%llu\n",node_count,node_size,node_count*node_size);
     byte* total_byte = malloc(node_count*node_size);
     for(int i=0;i<node_count;i++)
     {
@@ -156,7 +148,6 @@ int fhhfs_write_file(unsigned long long orig_node_id,file_header* new_file,void*
     //如果原来没有传入node id的话，我们生成一个。
     if(!orig_node_id)
     {
-        printf("DEBUG:Not passing orig node id!");
         unsigned long long tmp[1];
         allocate_node(tmp,1,process_buffer);
         orig_node_id = tmp[0];
@@ -194,16 +185,15 @@ int fhhfs_write_file(unsigned long long orig_node_id,file_header* new_file,void*
             node_id[pointer] = 1;
         }
     }
-    for(int i=0;i<node_count;i++) {
-        printf("%lld ",node_id[i]);
-    }
-    printf("\n");
     //然后是相对简单的写文件环节。
     pointer = 0;
     for(;pointer<node_count;pointer++)
     {
         fseek(block_file,node_id[pointer]*magic_head->node_size,SEEK_SET);
-        fwrite(new_file+pointer*magic_head->node_size,((pointer==node_count-1)?(((((file_header*)new_file)->filesize)+sizeof(file_header))%magic_head->node_size):magic_head->node_size),1,block_file);
+        unsigned long long offset = pointer*magic_head->node_size;
+        unsigned long long size = ((pointer==node_count-1)?(((((file_header*)new_file)->filesize)+sizeof(file_header))%magic_head->node_size):magic_head->node_size);
+
+        fwrite(((void*)new_file+offset),size,1,block_file);
     }
     return SUCCESS;
 }
@@ -309,11 +299,9 @@ readdir_fail:
 
 static int fhhfs_getattr(const char* path, struct stat *stbuf)
 {
-    printf("Getattr %s.\n",path);
     void* buffer = malloc(magic_head->node_size);
     unsigned long long node_id=get_node_id_by_full_path(path,RESOLVE_SELF,buffer);
     if(node_id!=ERR_NOTFOUND) {
-        printf("Got %s at %lld.\n",path,node_id);
         file_header* dir_data = (file_header*)fhhfs_read_file(node_id,1,buffer);
         if(dir_data==NULL) {
             free(buffer);
@@ -336,7 +324,6 @@ static int fhhfs_getattr(const char* path, struct stat *stbuf)
         free(dir_data);
     }
     else {
-        printf("Cannot got %s.\n",path);
         free(buffer);
         errno = ENOENT;
         return ERR_NOTFOUND;
@@ -383,8 +370,8 @@ static int fhhfs_read(const char * path, char * buf, size_t size, off_t off,stru
 }
 static int fhhfs_write(const char * filename, const char * buf, size_t size, off_t off,struct fuse_file_info * fi)
 {
-    printf("Write %s.\n",filename);
     void* buffer = malloc(magic_head->node_size);
+    //FIXME:NO NEED TO READ FORMER FILE DATA!
     void* file_data = fhhfs_read_file(fi->fh,0,buffer);
     if(((file_header*)file_data)->filesize<size+off) {
         ((file_header*)file_data)->filesize = size+off;
@@ -403,7 +390,6 @@ static int fhhfs_write(const char * filename, const char * buf, size_t size, off
 }
 static int fhhfs_create(const char * path, mode_t mode, struct fuse_file_info * fi)
 {
-    printf("Create %s.\n",path);
     int ret=SUCCESS;
     void* buffer = malloc(magic_head->node_size);
     unsigned long long parent_node_id = get_node_id_by_full_path(path,RESOLVE_PARENT,buffer);
