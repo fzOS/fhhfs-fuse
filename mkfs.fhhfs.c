@@ -122,69 +122,60 @@ int main(int argc,const char* argv[])
     fwrite(&root_node,sizeof(root_node),1,block_file);
     fflush(block_file);
     print("Creating node table nodes.\n");
-    //将节点分配表的相应位置清空。
+    //Empty node table.
     fseek(block_file,main_node_table_entry*magic_head.node_size,SEEK_SET);
-    unsigned long long i = NODE_EOF;
-    //先插入根节点的数据。
-    fwrite(&i,sizeof(unsigned long long),1,block_file);
-    fwrite(&i,sizeof(unsigned long long),1,block_file);
-    for(int k=0;k<magic_head.node_size/sizeof(unsigned long long)-2;k++)
-    {
-        fwrite(&i,sizeof(i),1,block_file);
-    }
-    i = NODE_UNUSED;
-    for(int j=1;j<node_table_length;j++)
-    {
-        for(int k=0;k<magic_head.node_size/sizeof(unsigned long long);k++)
-        {
-            fwrite(&i,sizeof(i),1,block_file);
-        }
+    unsigned long long* i = calloc(1,2048);
+    for(unsigned long long j=0;j<node_table_length;j++) {
+        fwrite(i,2048,1,block_file);
     }
     fseek(block_file,back_node_table_entry*magic_head.node_size,SEEK_SET);
-    fwrite(&i,sizeof(unsigned long long),1,block_file);
-    fwrite(&i,sizeof(unsigned long long),1,block_file);
-    for(int k=0;k<magic_head.node_size/sizeof(unsigned long long)-2;k++)
-    {
-        fwrite(&i,sizeof(i),1,block_file);
+    for(unsigned long long j=0;j<node_table_length;j++) {
+        fwrite(i,2048,1,block_file);
     }
-    for(int j=1;j<node_table_length;j++)
-    {
-        for(int k=0;k<magic_head.node_size/sizeof(unsigned long long);k++)
-        {
-            fwrite(&i,sizeof(i),1,block_file);
-        }
+    //Write root data in main table.
+    i[0] = i[1] = NODE_EOF;
+    fseek(block_file,main_node_table_entry*magic_head.node_size,SEEK_SET);
+    fwrite(i,sizeof(unsigned long long),2,block_file);
+    //Write main table nodes into main table.
+    fseek(block_file,(main_node_table_entry)*(magic_head.node_size+sizeof(unsigned long long)),SEEK_SET);
+    i[0] = main_node_table_entry +1;
+    for(unsigned long long j=0;j<node_table_length-1;j++) {
+        fwrite(i,sizeof(unsigned long long),1,block_file);
+        i[0]++;
     }
-    fseek(block_file,main_node_table_entry*magic_head.node_size+main_node_table_entry*sizeof(unsigned long long),SEEK_SET);    
-    for(i=main_node_table_entry;i<main_node_table_entry+node_table_length-1;i++)
-    {
-        fwrite(&i,sizeof(i),1,block_file);
+    i[0] = NODE_EOF;
+    fwrite(i,sizeof(unsigned long long),1,block_file);
+    //Write back table nodes into main table.
+    fseek(block_file,main_node_table_entry*magic_head.node_size+back_node_table_entry*sizeof(unsigned long long),SEEK_SET);
+    i[0] = back_node_table_entry +1;
+    for(unsigned long long j=0;j<node_table_length-1;j++) {
+        fwrite(i,sizeof(unsigned long long),1,block_file);
+        i[0]++;
     }
-    i=NODE_EOF;
-    fwrite(&i,sizeof(i),1,block_file);
-
-    fseek(block_file,main_node_table_entry*magic_head.node_size+back_node_table_entry*sizeof(unsigned long long),SEEK_SET);    
-    for(i=back_node_table_entry;i<back_node_table_entry+node_table_length-1;i++)
-    {
-        fwrite(&i,sizeof(i),1,block_file);
+    i[0] = NODE_EOF;
+    fwrite(i,sizeof(unsigned long long),1,block_file);
+    //Write root data in back table.
+    fseek(block_file,back_node_table_entry*magic_head.node_size,SEEK_SET);
+    fwrite(i,sizeof(unsigned long long),2,block_file);
+    //Write back table nodes into back table.
+    fseek(block_file,(back_node_table_entry)*(magic_head.node_size+sizeof(unsigned long long)),SEEK_SET);
+    i[0] = back_node_table_entry +1;
+    for(unsigned long long j=0;j<node_table_length-1;j++) {
+        fwrite(i,sizeof(unsigned long long),1,block_file);
+        i[0]++;
     }
-    i=NODE_EOF;
-    fwrite(&i,sizeof(i),1,block_file);
-
+    i[0] = NODE_EOF;
+    fwrite(i,sizeof(unsigned long long),1,block_file);
+    //Write main table nodes into back table.
     fseek(block_file,back_node_table_entry*magic_head.node_size+main_node_table_entry*sizeof(unsigned long long),SEEK_SET);
-    for(i=main_node_table_entry;i<main_node_table_entry+node_table_length-1;i++)
-    {
-        fwrite(&i,sizeof(i),1,block_file);
+    i[0] = back_node_table_entry +1;
+    for(unsigned long long j=0;j<node_table_length-1;j++) {
+        fwrite(i,sizeof(unsigned long long),1,block_file);
+        i[0]++;
     }
-    i=NODE_EOF;
-    fwrite(&i,sizeof(i),1,block_file);
-
-    fseek(block_file,back_node_table_entry*magic_head.node_size+back_node_table_entry*sizeof(unsigned long long),SEEK_SET);
-    for(i=back_node_table_entry;i<back_node_table_entry+node_table_length-1;i++)
-    {
-        fwrite(&i,sizeof(i),1,block_file);
-    }
-    i=NODE_EOF;
-    fwrite(&i,sizeof(i),1,block_file);
+    i[0] = NODE_EOF;
+    free(i);
+    fwrite(&i,sizeof(unsigned long long),1,block_file);
 out:fflush(block_file);
     fclose(block_file);
 exit:print("Done.\n");

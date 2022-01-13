@@ -7,6 +7,7 @@
 #include <fuse.h>
 #include <zlib.h>
 #include <time.h>
+#include <pthread.h>
 static fhhfs_magic_head* magic_head;
 static FILE* block_file;
 byte* fhhfs_read_file(unsigned long long block_id, unsigned long long count, void* process_buffer);
@@ -57,7 +58,12 @@ static int allocate_node(unsigned long long* dest,int n,void* process_buffer,uns
     if((magic_head->node_used*1.0/magic_head->node_total>0.3)||prev_id)
     {
         //顺序分配。
-        while(fhhfs_get_next_node(++tmp,process_buffer)!=0);
+        while(fhhfs_get_next_node(++tmp,process_buffer)!=0) {
+            if(tmp >= magic_head->node_total)
+            {
+                tmp = 2;
+            }
+        }
     }
     else
     {  
@@ -71,7 +77,7 @@ static int allocate_node(unsigned long long* dest,int n,void* process_buffer,uns
         {
             if(tmp >= magic_head->node_total)
             {
-                tmp = tmp - magic_head->node_total;
+                tmp = 2;
             }
         }
     }
@@ -415,20 +421,17 @@ static int fhhfs_write(const char * filename, const char * buf, size_t size, off
     if(((file_header*)buffer)->filesize<size+off) {
         unsigned long long allocated_node_count = ((((file_header*)buffer)->filesize+sizeof(file_header)-1)/ magic_head->node_size)+1;
         ((file_header*)buffer)->filesize = size+off;
+        printf("New file size:%lld,",((file_header*)buffer)->filesize);
         fseek(block_file,fi->fh*magic_head->node_size,SEEK_SET);
         fwrite(buffer,magic_head->node_size,1,block_file);
         //We need to allocate more nodes.
         unsigned long long new_node_count = ((size+off+sizeof(file_header)-1)/ magic_head->node_size)+1;
         unsigned long long last_node_number = fhhfs_get_nth_node_id(fi->fh,allocated_node_count-1,buffer);
+        printf("Orig node count:%lld,New node count:%lld\n",allocated_node_count,new_node_count);
         if(new_node_count-allocated_node_count) {
             unsigned long long dest[new_node_count-allocated_node_count];
             allocate_node(dest,new_node_count-allocated_node_count,buffer,last_node_number);
             write_node_id(last_node_number,dest[0],buffer);
-        }
-        unsigned long long k = fi->fh;
-        for(int i=0;i<new_node_count;i++) {
-            printf("%lld->%lld\n",k,fhhfs_get_next_node(k,buffer));
-            k = fhhfs_get_next_node(k,buffer);
         }
     }
     off += sizeof(file_header);
@@ -445,6 +448,7 @@ static int fhhfs_write(const char * filename, const char * buf, size_t size, off
     unsigned long long pointer = 0;
     unsigned long long current_node = fhhfs_get_nth_node_id(fi->fh,begin_nth_node,buffer);
     //Write！
+    printf("Writing first node:%lld\n",current_node);
     fseek(block_file,current_node*magic_head->node_size,SEEK_SET);
     fread(buffer,magic_head->node_size,1,block_file);
     memcpy(buffer+offset_in_previous_block,buf,(magic_head->node_size - offset_in_previous_block));
@@ -457,11 +461,13 @@ static int fhhfs_write(const char * filename, const char * buf, size_t size, off
         fread(buffer,magic_head->node_size,1,block_file);
         fseek(block_file,current_node*magic_head->node_size,SEEK_SET);
         memcpy(buffer,buf+pointer,magic_head->node_size);
+        printf("Writing middle node:%lld\n",current_node);
         fwrite(buffer,magic_head->node_size,1,block_file);
         pointer += magic_head->node_size;
     }
     if(offset_in_last_block) {
         current_node = fhhfs_get_next_node(current_node,buffer);
+        printf("Writing last node:%lld\n",current_node);
         fseek(block_file,current_node*magic_head->node_size,SEEK_SET);
         fread(buffer,magic_head->node_size,1,block_file);
         fseek(block_file,current_node*magic_head->node_size,SEEK_SET);
@@ -469,6 +475,7 @@ static int fhhfs_write(const char * filename, const char * buf, size_t size, off
         fwrite(buffer,magic_head->node_size,1,block_file);
         pointer += offset_in_last_block;
     }
+    fflush(block_file);
     free(buffer);
     return size;
 }
