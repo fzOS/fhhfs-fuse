@@ -105,6 +105,8 @@ static int allocate_node(unsigned long long* dest,int n,void* process_buffer,uns
     fseek(block_file,0,SEEK_SET);
     magic_head->node_used += n;
     fwrite(magic_head,sizeof(fhhfs_magic_head),1,block_file);
+    unsigned crc_value = crc32(CRC_MAGIC_NUMBER,(byte*)magic_head,sizeof(fhhfs_magic_head));
+    fwrite(&crc_value,sizeof(crc_value),1,block_file);
     fflush(block_file);
     return SUCCESS;
 }
@@ -218,7 +220,7 @@ int fhhfs_write_file(unsigned long long orig_node_id,file_header* new_file,void*
     }
     return SUCCESS;
 }
-int update_dir(unsigned long long dir_id,unsigned long long node_id,const char* filename,void* process_buffer)
+int insert_dir_entry(unsigned long long dir_id,unsigned long long node_id,const char* filename,void* process_buffer)
 {
     byte* file_data = fhhfs_read_file(dir_id,0,process_buffer);
     file_header* header = (file_header*) file_data;
@@ -241,6 +243,35 @@ int update_dir(unsigned long long dir_id,unsigned long long node_id,const char* 
     fhhfs_write_file(dir_id,header,process_buffer);
     free(file_data);
     return SUCCESS;
+}
+int remove_dir_entry(unsigned long long dir_id,const char* filename,void* process_buffer)
+{
+    byte* dir_data = fhhfs_read_file(dir_id,0,process_buffer);
+    unsigned long long length = ((file_header*)dir_data)->filesize;
+    unsigned long long offset = sizeof(file_header);
+    while(offset<length+sizeof(file_header))
+    {
+        if(!strcmp((char*)(dir_data+offset+sizeof(unsigned long long)),filename))
+        {
+            printf("%s!\n",(char*)(dir_data+offset+sizeof(unsigned long long)));
+            unsigned long long filename_length = strlen((char*)(dir_data+offset+sizeof(unsigned long long)));
+            unsigned long long remaining = (length+sizeof(file_header))-offset-sizeof(unsigned long long)-filename_length-1;
+            memmove(dir_data+offset,dir_data+offset+sizeof(unsigned long long)+filename_length+1,remaining);
+            ((file_header*)dir_data)->filesize -= (filename_length +1+sizeof(unsigned long long));
+            fhhfs_write_file(dir_id,(file_header*)dir_data,process_buffer);
+            free(dir_data);
+            return SUCCESS;
+        }
+        else
+        {
+            printf("Not %s...\n",(char*)(dir_data+offset+sizeof(unsigned long long)));
+            unsigned long long filename_length = strlen((char*)(dir_data+offset+sizeof(unsigned long long)));
+            offset = offset+filename_length+sizeof(unsigned long long)+1;
+        }
+    }
+    free(dir_data);
+    //由于我们这里需要返回节点，ERR_NOTFOUND与根目录节点冲突。因此，我们返回ERR_GENERIC（-1）。
+    return ERR_NOTFOUND;
 }
 static unsigned long long get_node_id_by_full_path(const char* path,PathResolveMethod method,void* process_buffer) {
     char temp_command[PATH_MAX];
@@ -330,7 +361,7 @@ static int fhhfs_getattr(const char* path, struct stat *stbuf)
         stbuf->st_gid = dir_data->group_id;
         stbuf->st_uid = dir_data->user_id;
         stbuf->st_size = dir_data->filesize;
-        stbuf->st_mode = ((dir_data->owner_priv)<<6) | ((dir_data->group_priv)<<3) | ((dir_data->owner_priv));
+        stbuf->st_mode = ((dir_data->owner_priv)<<6) | ((dir_data->group_priv)<<3) | ((dir_data->other_priv));
         switch (dir_data->file_type) {
             case 0:{stbuf->st_mode|=__S_IFREG;break;}
             case 1:{stbuf->st_mode|=__S_IFDIR;break;}
@@ -367,7 +398,6 @@ static int fhhfs_open(const char * filepath, struct fuse_file_info * fi)
 {
     void* buffer = malloc(magic_head->node_size);
     unsigned long long node_id = get_node_id_by_full_path(filepath,RESOLVE_SELF,buffer);
-    //TODO:permission check.
     fi->fh = node_id;
     free(buffer);
     return SUCCESS;
@@ -501,7 +531,7 @@ static int fhhfs_create(const char * path, mode_t mode, struct fuse_file_info * 
     if(parent_node_id!=ERR_NOTFOUND) {
         unsigned long long node_buffer[2];
         if(allocate_node(node_buffer,1,buffer,0)!=ERR_EXCEEDED) {
-            update_dir(parent_node_id,node_buffer[0],real_filename,buffer);
+            insert_dir_entry(parent_node_id,node_buffer[0],real_filename,buffer);
             unsigned long long timestamp = time(NULL);
             file_header h = {
                 .create_timestamp = timestamp,
@@ -536,7 +566,45 @@ static int fhhfs_statfs(const char *path, struct statvfs * fs)
     fs->f_bavail = magic_head->node_total - magic_head->node_used; 
     return SUCCESS;
 }
-static int fhhfs_setattr ;
+static int fhhfs_unlink(const char* filepath)
+{
+    int ret=SUCCESS;
+    void* buffer = malloc(magic_head->node_size);
+    unsigned long long node_id = get_node_id_by_full_path(filepath,RESOLVE_SELF,buffer);
+    unsigned long long parent_node_id = 1;//FIXME:get_node_id_by_full_path(filepath,RESOLVE_PARENT,buffer);
+    //Find filename。
+    const char* real_filename=&filepath[strlen(filepath)];
+    while(*(real_filename-1)!='/')
+    {
+        real_filename--;
+        if(real_filename==filepath) {
+            break;
+        }
+    }
+    printf("%lld,%s\n",parent_node_id,real_filename);
+#if 1
+    unsigned long long node_count=0;
+    if((ret = remove_dir_entry(parent_node_id,real_filename,buffer),ret)==SUCCESS) {
+        unsigned long long temp_id;
+        while(node_id!=1) {
+            temp_id = fhhfs_get_next_node(node_id,buffer);
+            (void)node_id;
+            (void)temp_id;
+            write_node_id(node_id,0,buffer);
+            node_id = temp_id;
+            node_count++;
+        }
+        magic_head->node_used -= node_count;
+        fseek(block_file,0,SEEK_SET);
+        fwrite(magic_head,sizeof(fhhfs_magic_head),1,block_file);
+        unsigned crc_value = crc32(CRC_MAGIC_NUMBER,(byte*)magic_head,sizeof(fhhfs_magic_head));
+        fwrite(&crc_value,sizeof(crc_value),1,block_file);
+        fflush(block_file);
+    }
+#endif
+    free(buffer);
+    return ret;
+}
 static struct fuse_operations tfs_ops = {
     .readdir = fhhfs_readdir,
     .getattr = fhhfs_getattr,
@@ -545,7 +613,8 @@ static struct fuse_operations tfs_ops = {
     .read    = fhhfs_read,
     .write   = fhhfs_write,
     .create  = fhhfs_create,
-    .statfs  = fhhfs_statfs
+    .statfs  = fhhfs_statfs,
+    .unlink  = fhhfs_unlink
 };
 void fhhfs_mount(void)
 {
@@ -601,7 +670,7 @@ int main(int argc, char *argv[])
         exit(-1);
     }
     fhhfs_mount();
-    char* args_to_fuse[4] = {argv[0],argv[2],"-d","-s"};
-    ret = fuse_main(4, args_to_fuse, &tfs_ops, NULL);
+    char* args_to_fuse[] = {argv[0],argv[2],"-f","-s","-o","fsname=fhhfs,big_writes"};
+    ret = fuse_main(sizeof(args_to_fuse)/sizeof(char*), args_to_fuse, &tfs_ops, NULL);
     return ret;
 }
